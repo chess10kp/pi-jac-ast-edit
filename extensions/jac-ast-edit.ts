@@ -87,10 +87,11 @@ function runEngine(
 const operationSchema = Type.Object({
   action: Type.String({
     description:
-      "Operation to apply. MICRO: rename, remove, set_initializer, set_return_type. " +
+      "Operation to apply. 'symbols' = list every symbol (kind, name, line range) — run this FIRST to discover targets before editing. " +
+      "MICRO: rename, remove, set_initializer, set_return_type, set_type, add_parameter, remove_parameter, set_extends. " +
       "BODY: set_body, add_statement, replace_in_body. " +
       "STRUCT: add_method, add_property (has var), add_member (autodetect), replace (whole symbol), add_function (module-level def). " +
-      "FILE: insert_text (value='after-imports' | index 0|-1), add_import.",
+      "FILE: insert_text (value='after-imports' | index 0|-1), add_import, add_named_import, remove_import, organize_imports, add_enum, add_archetype, add_glob, add_type_alias, add_impl, add_test.",
   }),
   target: Type.Optional(
     Type.String({
@@ -138,6 +139,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "AST-native editor for Jac files (.jac) — default editor for Jac, used BEFORE write/text edits, not as a fallback. " +
       "Locates symbols by {target, name} via the tree-sitter-jac grammar: no oldString, no whitespace/escape failures, no line-offset drift. " +
+      "DISCOVERY: {path, action:'symbols'} lists every symbol with kind + line range — use before batch edits to pick correct target/name/index. " +
       "Single op: {path, action, target, name, value?, newCode?, index?}. " +
       "ATOMIC multi-op: {path, operations:[{...}, ...]} — all-or-nothing; the result is re-parsed and REJECTED if it would introduce syntax errors (nothing written). Use for 'add import + use it' in one call. " +
       "Targets: obj|node|edge|walker|class (=archetype), function (module-level def), ability|method (can/def — members as 'Card.label' or bare 'label'), has|property (has vars), test, impl ('Animal.speak'), enum, member (enum member), glob, type (type_alias), import, code (free 'with entry' blocks). Duplicate names: index disambiguates. " +

@@ -43,6 +43,9 @@ pi install /home/jac/repos/pi-jac-ast-edit
 Single op: `{path, action, target, name, value?, newCode?, index?}`.
 Atomic batch: `{path, operations: [{...}, ...]}`.
 
+Discovery: `{path, action: 'symbols'}` lists every symbol (kind, name,
+qualified, line range) — run before editing to find targets.
+
 Targets: `obj|node|edge|walker|class` (= `archetype`), `function` (module-level
 def), `ability|method` (can/def; use `Card.label` for members), `has|property`
 (has vars), `test`, `impl` (`Animal.speak`), `enum`, `member` (enum member),
