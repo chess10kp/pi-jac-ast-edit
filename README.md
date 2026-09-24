@@ -51,10 +51,15 @@ Duplicate names disambiguate with `index`.
 
 | Tier | Ops |
 |---|---|
-| MICRO | `rename` (declaration site), `remove`, `set_initializer`, `set_return_type` |
+| MICRO | `rename` (declaration site), `remove`, `set_initializer`, `set_return_type`, `set_type` (has/glob var), `add_parameter`, `remove_parameter` (`value` = param name), `set_extends` (archetype bases; `value` = `'Base, Mixin'` or `''` to clear) |
 | BODY | `set_body`, `add_statement`, `replace_in_body` (unique anchor; ambiguous → rejected) |
 | STRUCT | `add_method`, `add_property` (auto `has` prefix, lands above methods), `add_member`, `replace`, `add_function` |
-| FILE | `create_file` (sole op only), `insert_text` (`value='after-imports'` or `index` 0/−1), `add_import` |
+| FILE | `create_file` (sole op only), `insert_text` (`value='after-imports'` or `index` 0/−1), `add_import` + `add_named_import` (both idempotent), `remove_import` (`value`=module, `newCode`=symbol for single item), `organize_imports` (merge/sort/dedupe), `add_enum`, `add_archetype` (`target`=obj\|node\|edge\|walker\|class, `value`=name), `add_glob`, `add_type_alias` (`value`=name, `newCode`=type expr), `add_impl` (`newCode`=full impl text), `add_test` (`value`=name, auto-quoted) |
+
+Known grammar gaps (the re-parse gate rejects these — use supported forms):
+bare `has x;` with neither type nor default, `impl ... for ...` root form
+(write `impl Archetype.ability { }`), and `check` statements in test bodies
+(use `assert`).
 
 Body contract: `set_body`/`add_statement` take **contents only** (no braces),
 written at final indentation; absolute-style indentation is auto-renested.
@@ -76,6 +81,12 @@ Prompt suggestions and behaviors ported from `~/repos/notes/Empryo/src/core/tool
   ATOMIC import+method) and the CAN DO / CANNOT target / fallback-rules
   guidance.
 - **Output deltas** — `lines +N`, byte counts, atomic op lists.
+- **Full action parity where Jac allows it** — `set_type`, parameter ops,
+  `set_extends`, named/organized import management, and FILE-level
+  declaration creators (`add_enum`, `add_archetype`, `add_glob`,
+  `add_type_alias`, `add_impl`, `add_test`). TS-only machinery (jsdoc,
+  decorators, overloads, interfaces, exports, fix_missing_imports) has no
+  Jac equivalent and is intentionally absent.
 
 Not ported (Empryo-infra specific): undo stack, editor reload, memory hints,
 clone hints, auto-format appends (use `jac_format_jac` instead), CAS

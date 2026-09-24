@@ -240,6 +240,20 @@ def _resolve(symbols: list[Symbol], target: str | None, name: str | None,
     return cands[idx]
 
 
+def _import_info(stmt: Node) -> dict:
+    """(path, items, is_from) for an import_statement node."""
+    path_txt = None
+    items: list[str] = []
+    is_from = False
+    for c in stmt.children:
+        if c.type == "import_path":
+            path_txt = _node_text(c)
+        elif c.type == "import_items":
+            is_from = True
+            items = [_node_text(ic) for ic in c.named_children]
+    return {"path": path_txt, "items": items, "is_from": is_from}
+
+
 # --------------------------------------------------------------------------
 # span computation
 
@@ -516,6 +530,247 @@ class Engine:
         code = op["newCode"].rstrip() + "\n"
         self.splice(len(self.src), len(self.src), ("\n" if self.src and not self.src.endswith(b"\n\n") else "") + code, "add_function")
 
+    # -- structural micro ops (Empryo harvest) -----------------------------
+
+    def op_set_type(self, op):
+        s = self.must(op.get("target"), op.get("name"), op.get("index"))
+        val = op["value"].strip()
+        ta = next((c for c in s.node.named_children
+                   if c.type == "type_annotation"), None)
+        if ta is not None:
+            self.splice(ta.start_byte, ta.end_byte, val, f"set_type {s.qualified}")
+        else:
+            nm = s.node.named_children[0]  # identifier
+            self.splice(nm.end_byte, nm.end_byte, f": {val}",
+                        f"set_type {s.qualified}")
+
+    def _param_list_of(self, s: Symbol) -> Node:
+        sig = next((c for c in s.node.named_children
+                    if c.type == "func_signature"), None)
+        if sig is None:
+            raise EditError("no_parameters",
+                            f"{s.qualified or s.kind} has no parameter list")
+        pl = next((c for c in sig.named_children
+                   if c.type == "parameter_list"), None)
+        if pl is None:
+            raise EditError("no_parameters",
+                            f"{s.qualified or s.kind} has no parameter list")
+        return pl
+
+    def op_add_parameter(self, op):
+        s = self.must(op.get("target") or "ability", op.get("name"),
+                      op.get("index"))
+        pl = self._param_list_of(s)
+        val = op["value"].strip()
+        params = [c for c in pl.named_children if c.type == "param"]
+        if params:
+            last = params[-1]
+            self.splice(last.end_byte, last.end_byte, ", " + val,
+                        f"add_parameter {s.qualified}")
+        else:
+            cb = pl.children[-1]  # ')'
+            self.splice(cb.start_byte, cb.start_byte, val,
+                        f"add_parameter {s.qualified}")
+
+    def op_remove_parameter(self, op):
+        s = self.must(op.get("target") or "ability", op.get("name"),
+                      op.get("index"))
+        pl = self._param_list_of(s)
+        want = (op.get("value") or "").strip()
+        params = [c for c in pl.named_children if c.type == "param"]
+        tgt = next((pm for pm in params
+                    if pm.named_children
+                    and _node_text(pm.named_children[0]) == want), None)
+        if tgt is None:
+            names = [_node_text(pm.named_children[0]) for pm in params
+                     if pm.named_children]
+            raise EditError(
+                "parameter_not_found",
+                f"no parameter named {want!r} in {s.qualified or s.kind}",
+                [f"parameters: {', '.join(names)}" if names else "<none>"])
+        sibs = pl.children
+        i = sibs.index(tgt)
+        start, end = tgt.start_byte, tgt.end_byte
+        if i + 1 < len(sibs) and _node_text(sibs[i + 1]) == ",":
+            end = sibs[i + 1].end_byte
+        elif i - 1 >= 0 and _node_text(sibs[i - 1]) == ",":
+            start = sibs[i - 1].start_byte
+        self.splice(start, end, "", f"remove_parameter {s.qualified}.{want}")
+
+    def op_set_extends(self, op):
+        s = self.must(op.get("target") or "archetype", op.get("name"),
+                      op.get("index"))
+        kids = s.node.children
+        ob_i = next((i for i, c in enumerate(kids)
+                     if _node_text(c) == "("), -1)
+        val = (op.get("value") or "").strip()
+        if ob_i >= 0:
+            cb_i = next(i for i in range(ob_i + 1, len(kids))
+                        if _node_text(kids[i]) == ")")
+            self.splice(kids[ob_i].end_byte, kids[cb_i].start_byte, val,
+                        f"set_extends {s.qualified}")
+        elif val:
+            nm = _field(s.node, "name")
+            self.splice(nm.end_byte, nm.end_byte, f"({val})",
+                        f"set_extends {s.qualified}")
+
+    # -- import ops ---------------------------------------------------------
+
+    def op_add_named_import(self, op):
+        module = (op.get("value") or "").strip()
+        sym = (op.get("newCode") or "").strip()
+        for s in (x for x in self.symbols
+                  if x.kind == "import" and x.node.type == "import_statement"):
+            info = _import_info(s.node)
+            if info["path"] != module or not info["is_from"]:
+                continue
+            bare = sym.split(" as ")[0].strip()
+            if any(it.split(" as ")[0].strip() == bare
+                   for it in info["items"]):
+                return  # idempotent — already imported
+            items_node = next(c for c in s.node.children
+                              if c.type == "import_items")
+            named = items_node.named_children
+            if named:
+                last = named[-1]
+                self.splice(last.end_byte, last.end_byte, ", " + sym,
+                            f"add_named_import {module}.{bare}")
+            else:
+                cb = next(c for c in items_node.children
+                          if _node_text(c) == "}")
+                self.splice(cb.start_byte, cb.start_byte, sym,
+                            f"add_named_import {module}.{bare}")
+            return
+        self.op_add_import({"value": f"import from {module} {{ {sym} }};"})
+
+    def op_remove_import(self, op):
+        module = (op.get("value") or "").strip()
+        sym = (op.get("newCode") or "").strip() or None
+        for s in (x for x in self.symbols
+                  if x.kind == "import" and x.node.type == "import_statement"):
+            info = _import_info(s.node)
+            if info["path"] != module:
+                continue
+            if sym and info["is_from"]:
+                items_node = next(c for c in s.node.children
+                                  if c.type == "import_items")
+                named = items_node.named_children
+                ident = next((c for c in named
+                              if _node_text(c).split(" as ")[0].strip() == sym),
+                             None)
+                if ident is None:
+                    raise EditError(
+                        "symbol_not_found",
+                        f"{module!r} does not import {sym!r}",
+                        [f"items: {', '.join(_node_text(c) for c in named)}"])
+                if len(named) > 1:
+                    sibs = items_node.children
+                    i = sibs.index(ident)
+                    start, end = ident.start_byte, ident.end_byte
+                    if i + 1 < len(sibs) and _node_text(sibs[i + 1]) == ",":
+                        end = sibs[i + 1].end_byte
+                    elif i - 1 >= 0 and _node_text(sibs[i - 1]) == ",":
+                        start = sibs[i - 1].start_byte
+                    self.splice(start, end, "",
+                                f"remove_import {module}.{sym}")
+                    return
+                # last item → remove the whole statement
+            ls, le = _trim_removal(self.src, s.node.start_byte, s.node.end_byte)
+            self.splice(ls, le, "", f"remove_import {module}")
+            return
+        raise EditError("symbol_not_found", f"no import of {module!r}",
+                        ["add one with add_import first"])
+
+    def op_organize_imports(self, op):
+        imports = [s for s in self.symbols
+                   if s.kind == "import" and s.node.type == "import_statement"]
+        if len(imports) <= 1:
+            return
+        plains: dict[str, str] = {}
+        froms: dict[str, list[str]] = {}
+        for s in imports:
+            info = _import_info(s.node)
+            if info["is_from"]:
+                lst = froms.setdefault(info["path"], [])
+                for it in info["items"]:
+                    if it not in lst:
+                        lst.append(it)
+            else:
+                plains[info["path"]] = f"import {info['path']};"
+        lines = [plains[k] for k in sorted(plains)]
+        lines += [f"import from {k} {{ {', '.join(froms[k])} }};"
+                  for k in sorted(froms)]
+        first = imports[0].node
+        self.splice(first.start_byte, first.end_byte, "\n".join(lines),
+                    "organize_imports")
+        for s in imports[1:]:
+            ls, le = _trim_removal(self.src, s.node.start_byte, s.node.end_byte)
+            self.splice(ls, le, "", "organize_imports")
+
+    # -- module-level declaration creators ----------------------------------
+
+    def _append_module(self, code: str, label: str):
+        pre = ""
+        if self.src and not self.src.endswith(b"\n\n"):
+            pre = "\n" if self.src.endswith(b"\n") else "\n\n"
+        self.splice(len(self.src), len(self.src), pre + code, label)
+
+    def _after_imports_pos(self) -> int:
+        imports = [s for s in self.symbols if s.kind == "import"]
+        return imports[-1].node.end_byte if imports else 0
+
+    def _wrapped(self, head: str, body: str) -> str:
+        inner = ("\n" + _indent_block(_renest(body.strip("\n"), ""), "    ")
+                 + "\n") if body.strip() else ""
+        return f"{head} {{{inner}}}\n"
+
+    def op_add_enum(self, op):
+        name = (op.get("value") or "").strip()
+        code = self._wrapped(f"enum {name}", op.get("newCode") or "")
+        self._append_module(code, f"add_enum {name}")
+
+    def op_add_archetype(self, op):
+        kind = (op.get("target") or "obj").lower()
+        if kind == "archetype":
+            kind = "obj"
+        if kind not in ("obj", "node", "edge", "walker", "class"):
+            raise EditError(
+                "bad_target",
+                f"add_archetype target must be obj|node|edge|walker|class, "
+                f"got {kind!r}")
+        name = (op.get("value") or "").strip()
+        code = self._wrapped(f"{kind} {name}", op.get("newCode") or "")
+        self._append_module(code, f"add_archetype {kind} {name}")
+
+    def op_add_glob(self, op):
+        text = (op.get("newCode") or op.get("value") or "").strip()
+        if not text.startswith("glob "):
+            text = "glob " + text
+        if not text.rstrip().endswith(";"):
+            text = text.rstrip() + ";"
+        pos = self._after_imports_pos()
+        pre = "" if pos == 0 else "\n"
+        self.splice(pos, pos, pre + text + "\n", "add_glob")
+
+    def op_add_type_alias(self, op):
+        name = (op.get("value") or "").strip()
+        texp = (op.get("newCode") or "").strip().rstrip(";")
+        pos = self._after_imports_pos()
+        pre = "" if pos == 0 else "\n"
+        self.splice(pos, pos, pre + f"type {name} = {texp};\n",
+                    f"add_type_alias {name}")
+
+    def op_add_impl(self, op):
+        code = op["newCode"].strip("\n") + "\n"
+        self._append_module(code, "add_impl")
+
+    def op_add_test(self, op):
+        name = (op.get("value") or "").strip()
+        if not name.startswith(('"', "'")):
+            name = f'"{name}"'
+        code = self._wrapped(f"test {name}", op.get("newCode") or "")
+        self._append_module(code, f"add_test {name}")
+
     # -- file ops ----------------------------------------------------------
 
     def op_insert_text(self, op):
@@ -570,6 +825,19 @@ OPS = {
     "add_function": Engine.op_add_function,
     "insert_text": Engine.op_insert_text,
     "add_import": Engine.op_add_import,
+    "set_type": Engine.op_set_type,
+    "add_parameter": Engine.op_add_parameter,
+    "remove_parameter": Engine.op_remove_parameter,
+    "set_extends": Engine.op_set_extends,
+    "add_named_import": Engine.op_add_named_import,
+    "remove_import": Engine.op_remove_import,
+    "organize_imports": Engine.op_organize_imports,
+    "add_enum": Engine.op_add_enum,
+    "add_archetype": Engine.op_add_archetype,
+    "add_glob": Engine.op_add_glob,
+    "add_type_alias": Engine.op_add_type_alias,
+    "add_impl": Engine.op_add_impl,
+    "add_test": Engine.op_add_test,
 }
 
 
